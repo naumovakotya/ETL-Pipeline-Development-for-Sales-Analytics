@@ -1,0 +1,65 @@
+# ---
+# apiVersion: v1
+# kind: PersistentVolumeClaim
+# metadata:
+#   name: postgres-operational-pvc
+#   labels:
+#     app: postgres-operational
+# spec:
+#   accessModes:
+#     - ReadWriteOnce
+#   resources:
+#     requests:
+#       storage: 5Gi
+#   storageClassName: standard
+# ---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-operational-db
+  labels:
+    app: postgres-operational
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-operational
+  serviceName: "postgres-operational-service"
+  template:
+    metadata:
+      labels:
+        app: postgres-operational
+    spec:
+      containers:
+      - name: postgres-operational
+        image: postgres:15
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-operational-secret
+              key: user
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-operational-secret
+              key: password
+        - name: POSTGRES_DB
+          valueFrom:
+            secretKeyRef:
+              name: postgres-operational-secret
+              key: db
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-storage
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 1Gi

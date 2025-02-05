@@ -1,0 +1,65 @@
+# ---
+# apiVersion: v1
+# kind: PersistentVolumeClaim
+# metadata:
+#   name: postgres-analytics-pvc
+#   labels:
+#     app: postgres-analytics
+# spec:
+#   accessModes:
+#     - ReadWriteOnce
+#   resources:
+#     requests:
+#       storage: 5Gi
+#   storageClassName: standard
+# ---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-analytics-db
+  labels:
+    app: postgres-analytics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-analytics
+  serviceName: "postgres-analytics-service"
+  template:
+    metadata:
+      labels:
+        app: postgres-analytics
+    spec:
+      containers:
+      - name: postgres-analytics
+        image: postgres:15
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-analytics-secret
+              key: user
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-analytics-secret
+              key: password
+        - name: POSTGRES_DB
+          valueFrom:
+            secretKeyRef:
+              name: postgres-analytics-secret
+              key: db
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-storage
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 1Gi

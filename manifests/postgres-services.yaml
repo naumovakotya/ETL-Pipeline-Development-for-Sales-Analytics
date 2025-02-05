@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-operational-service
+spec:
+  selector:
+    app: postgres-operational
+  type: NodePort
+  ports:
+  - protocol: TCP
+    port: 5432
+    targetPort: 5432
+    nodePort: 30432
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-analytics-service
+spec:
+  selector:
+    app: postgres-analytics
+  type: NodePort
+  ports:
+  - protocol: TCP
+    port: 5433
+    targetPort: 5432
+    nodePort: 30433
