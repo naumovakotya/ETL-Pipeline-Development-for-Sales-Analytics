@@ -8,12 +8,44 @@ import logging
 
 default_args = {
     'owner': 'airflow',
-    'start_date': datetime(2025, 2, 1),
-    'retries': 3,
+    'start_date': datetime(2025, 2, 5),
+    'retries': 3, 
     'retry_delay': timedelta(minutes=5),
 }
 
-def backup_schema(schema_name, postgres_conn_id="postgres_analytics", backup_dir="/backup"):
+# Система логирования
+def log_event(process_name, status, message):
+    """
+    Записывает событие в таблицу логов.
+    process_name – имя пакета/задачи (например, task_id),
+    status – 'SUCCESS' или 'FAILURE',
+    message – текст сообщения (например, описание ошибки).
+    """
+    try:
+        hook = PostgresHook(postgres_conn_id="postgres_dwh")
+        conn = hook.get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO dwh_metadata.logs (process_name, log_time, status, message)
+            VALUES (%s, NOW(), %s, %s);
+        """, (process_name, status, message))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as log_ex:
+        logging.error("Не удалось записать лог: %s", str(log_ex))
+
+# Коллбэки для логирования
+def on_success_callback(context):
+    task_id = context['task_instance'].task_id
+    log_event(task_id, "SUCCESS", "Задача выполнена успешно.")
+
+def on_failure_callback(context):
+    task_id = context['task_instance'].task_id
+    exception = context.get('exception')
+    log_event(task_id, "FAILURE", f"Ошибка: {str(exception)}")
+
+def backup_schema(schema_name, postgres_conn_id="postgres_dwh", backup_dir="/backup"):
     """
     Выполняет резервное копирование указанной схемы с помощью pg_dump.
     Файл сохраняется в директории backup_dir с именем вида: schema_YYYYMMDDHHMMSS.sql
@@ -24,13 +56,13 @@ def backup_schema(schema_name, postgres_conn_id="postgres_analytics", backup_dir
 
     # Получаем параметры подключения из Airflow Connections
     hook = PostgresHook(postgres_conn_id=postgres_conn_id)
-    conn = hook.get_connection(postgres_conn_id)
+    conn_obj = hook.get_connection(postgres_conn_id)
 
-    pg_host = conn.host
-    pg_port = conn.port
-    pg_user = conn.login
-    pg_password = conn.password
-    pg_db = conn.schema  # База данных (test_analytics)
+    pg_host = conn_obj.host
+    pg_port = conn_obj.port
+    pg_user = conn_obj.login
+    pg_password = conn_obj.password
+    pg_db = conn_obj.schema  # База данных (test_analytics)
 
     # Используем параметр -n (namespace), чтобы сделать дамп только схемы
     cmd = f'PGPASSWORD="{pg_password}" pg_dump -h {pg_host} -p {pg_port} -U {pg_user} -d {pg_db} -n {schema_name} -F c -f {backup_file}'
@@ -52,35 +84,14 @@ def backup_task_func(schema_name, **kwargs):
     
     try:
         backup_file = backup_schema(schema_name, backup_dir=backup_dir)
-
-        # Записываем успех в лог
-        hook = PostgresHook(postgres_conn_id="postgres_analytics")
-        conn = hook.get_conn()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO dwh_metadata.etl_logs (package_name, log_time, status, message)
-            VALUES (%s, NOW(), %s, %s);
-        """, (f"backup_{schema_name}", "SUCCESS", f"Backup completed: {backup_file}"))
-        conn.commit()
-        cur.close()
-        conn.close()
-
+        log_event(f"backup_{schema_name}", "SUCCESS", f"Backup completed: {backup_file}")
         return backup_file
 
     except Exception as e:
         logging.error(f"Ошибка при резервном копировании схемы {schema_name}: {str(e)}")
-
         # Записываем ошибку в лог
-        hook = PostgresHook(postgres_conn_id="postgres_analytics")
-        conn = hook.get_conn()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO dwh_metadata.etl_logs (package_name, log_time, status, message)
-            VALUES (%s, NOW(), %s, %s);
-        """, (f"backup_{schema_name}", "FAILURE", str(e)))
-        conn.commit()
-        cur.close()
-        conn.close()
+        log_event(f"backup_{schema_name}", "FAILURE", str(e))
+
 
 with DAG(
     'backup_dag',
@@ -92,17 +103,31 @@ with DAG(
     backup_mrr = PythonOperator(
         task_id='backup_mrr',
         python_callable=backup_task_func,
-        op_kwargs={'schema_name': 'mrr'}
+        on_success_callback=on_success_callback,
+        on_failure_callback=on_failure_callback,
+        op_kwargs={'schema_name': 'public'}
     )
     backup_stg = PythonOperator(
         task_id='backup_stg',
         python_callable=backup_task_func,
-        op_kwargs={'schema_name': 'stg'}
+        on_success_callback=on_success_callback,
+        on_failure_callback=on_failure_callback,
+        op_kwargs={'schema_name': 'public'}
     )
     backup_dwh = PythonOperator(
         task_id='backup_dwh',
         python_callable=backup_task_func,
-        op_kwargs={'schema_name': 'dwh'}
+        on_success_callback=on_success_callback,
+        on_failure_callback=on_failure_callback,
+        op_kwargs={'schema_name': 'public'}
+    )
+    
+    backup_dwh_metadata = PythonOperator(
+        task_id='backup_dwh_metadata',
+        python_callable=backup_task_func,
+        on_success_callback=on_success_callback,
+        on_failure_callback=on_failure_callback,
+        op_kwargs={'schema_name': 'dwh_metadata'}
     )
 
-    backup_mrr >> backup_stg >> backup_dwh
+    backup_mrr >> backup_stg >> backup_dwh >> backup_dwh_metadata

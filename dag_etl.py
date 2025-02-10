@@ -9,52 +9,44 @@ from datetime import datetime, timedelta
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
-    'start_date': datetime(2025, 2, 1),
+    'start_date': datetime(2025, 2, 5),
     'retries': 3,
     'retry_delay': timedelta(minutes=5),
 }
 
-# Подключение к БД
+# Подключения к разным инстансам
 def connect_to_operational():
-    """
-    Возвращает соединение с оперативной базой 
-    по Airflow Connection 'postgres_operational'.
-    """
     hook = PostgresHook(postgres_conn_id="postgres_operational")
     return hook.get_conn()
 
-def connect_to_analytics():
-    """
-    Возвращает соединение с аналитической базой (где находятся схемы MRR, STG, DWH и dwh_metadata)
-    по Airflow Connection 'postgres_analytics'.
-    """
-    hook = PostgresHook(postgres_conn_id="postgres_analytics")
+def connect_to_mrr():
+    hook = PostgresHook(postgres_conn_id="postgres_mrr")
     return hook.get_conn()
 
-# Система логирования
-def log_event(package_name, status, message):
-    """
-    Записывает событие в таблицу логов.
-    package_name – имя пакета/задачи (например, task_id),
-    status – 'SUCCESS' или 'FAILURE',
-    message – текст сообщения (например, описание ошибки).
-    """
+def connect_to_stg():
+    hook = PostgresHook(postgres_conn_id="postgres_stg")
+    return hook.get_conn()
+
+def connect_to_dwh():
+    hook = PostgresHook(postgres_conn_id="postgres_dwh")
+    return hook.get_conn()
+
+# Система логирования: пишем в таблицу dwh_metadata.logs в базе DWH (connection postgres_dwh)
+def log_event(process_name, status, message):
     try:
-        from airflow.providers.postgres.hooks.postgres import PostgresHook
-        hook = PostgresHook(postgres_conn_id="postgres_analytics")
+        hook = PostgresHook(postgres_conn_id="postgres_dwh")
         conn = hook.get_conn()
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO dwh_metadata.etl_logs (package_name, log_time, status, message)
+            INSERT INTO dwh_metadata.logs (process_name, log_time, status, message)
             VALUES (%s, NOW(), %s, %s);
-        """, (package_name, status, message))
+        """, (process_name, status, message))
         conn.commit()
         cur.close()
         conn.close()
     except Exception as log_ex:
         logging.error("Не удалось записать лог: %s", str(log_ex))
 
-# Коллбэки для логирования
 def on_success_callback(context):
     task_id = context['task_instance'].task_id
     log_event(task_id, "SUCCESS", "Задача выполнена успешно.")
@@ -68,23 +60,25 @@ def etl_task(**kwargs):
     try:
         logging.info("Начало ETL-процесса: Operational → MRR → STG → DWH")
         
-        # --- Шаг 1. Получение high water mark для mrr_fact_sales ---
-        conn_anal = connect_to_analytics()
-        cur_anal = conn_anal.cursor()
-        cur_anal.execute("""
+        # --- Шаг 1. Получение high water mark из базы dwh (схема dwh_metadata) ---
+        conn_dwh = connect_to_dwh()
+        cur_dwh = conn_dwh.cursor()
+        cur_dwh.execute("""
             SELECT last_update 
             FROM dwh_metadata.high_water_mark 
             WHERE table_name = 'mrr_fact_sales';
         """)
-        row = cur_anal.fetchone()
-        last_update = row[0] if row else datetime(2000, 1, 1) # Значение по умолчанию, если записи нет
+        row = cur_dwh.fetchone()
+        last_update = row[0] if row else datetime(2000, 1, 1)
         logging.info("High water mark (last_update): %s", last_update)
+        cur_dwh.close()
+        conn_dwh.close()
         
-        # --- Шаг 2. Извлечение новых продаж из оперативной БД ---
+        # --- Шаг 2. Извлечение новых продаж из операционной базы ---
         conn_oper = connect_to_operational()
         cur_oper = conn_oper.cursor()
         cur_oper.execute("""
-            SELECT customer_id, product_id, qty, sale_date 
+            SELECT id, customer_id, product_id, qty, sale_date 
             FROM sales 
             WHERE sale_date > %s;
         """, (last_update,))
@@ -93,23 +87,26 @@ def etl_task(**kwargs):
         conn_oper.close()
         logging.info("Извлечено %d новых записей из оперативной БД", len(new_sales))
         
-        # --- Шаг 3. Загрузка сырых данных продаж в MRR ---
+        # --- Шаг 3. Загрузка сырых данных продаж в базу mrr ---
+        conn_mrr = connect_to_mrr()
+        cur_mrr = conn_mrr.cursor()
         for sale in new_sales:
             sale_dict = {
-                "customer_id": sale[0],
-                "product_id": sale[1],
-                "qty": sale[2],
-                "sale_date": str(sale[3])
+                "source_id": sale[0],
+                "customer_id": sale[1],
+                "product_id": sale[2],
+                "qty": sale[3],
+                "sale_date": str(sale[4])
             }
             raw_json = json.dumps(sale_dict)
-            cur_anal.execute("""
-                INSERT INTO mrr.mrr_fact_sales (raw_data, load_date)
+            cur_mrr.execute("""
+                INSERT INTO mrr_fact_sales (raw_data, load_date)
                 VALUES (%s, NOW());
             """, (raw_json,))
-        conn_anal.commit()
-        logging.info("Загружены сырые данные продаж в MRR (mrr.mrr_fact_sales)")
+        conn_mrr.commit()
+        logging.info("Загружены сырые данные продаж в MRR (mrr_fact_sales)")
         
-        # --- Шаг 4. Загрузка данных измерений (клиентов и продуктов) в MRR ---
+        # --- Шаг 4. Загрузка измерений в mrr ---
         # Для клиентов
         conn_oper = connect_to_operational()
         cur_oper = conn_oper.cursor()
@@ -117,16 +114,17 @@ def etl_task(**kwargs):
         customers = cur_oper.fetchall()
         cur_oper.close()
         conn_oper.close()
-        cur_anal.execute("TRUNCATE TABLE mrr.mrr_dim_customers;")
+        cur_mrr.execute("TRUNCATE TABLE mrr_dim_customers;")
         for cust in customers:
             cust_dict = {"id": cust[0], "name": cust[1], "country": cust[2]}
             raw_json = json.dumps(cust_dict)
-            cur_anal.execute("""
-                INSERT INTO mrr.mrr_dim_customers (raw_data, load_date)
+            # Здесь добавляем source_id; предположим, что source_id равен id
+            cur_mrr.execute("""
+                INSERT INTO mrr_dim_customers (raw_data, load_date)
                 VALUES (%s, NOW());
             """, (raw_json,))
-        conn_anal.commit()
-        logging.info("Загружены данные клиентов в MRR (mrr.mrr_dim_customers)")
+        conn_mrr.commit()
+        logging.info("Загружены данные клиентов в MRR (mrr_dim_customers)")
         
         # Для продуктов
         conn_oper = connect_to_operational()
@@ -135,115 +133,153 @@ def etl_task(**kwargs):
         products = cur_oper.fetchall()
         cur_oper.close()
         conn_oper.close()
-        cur_anal.execute("TRUNCATE TABLE mrr.mrr_dim_products;")
+        cur_mrr.execute("TRUNCATE TABLE mrr_dim_products;")
         for prod in products:
             prod_dict = {"id": prod[0], "name": prod[1], "groupname": prod[2]}
             raw_json = json.dumps(prod_dict)
-            cur_anal.execute("""
-                INSERT INTO mrr.mrr_dim_products (raw_data, load_date)
+            cur_mrr.execute("""
+                INSERT INTO mrr_dim_products (raw_data, load_date)
                 VALUES (%s, NOW());
             """, (raw_json,))
-        conn_anal.commit()
-        logging.info("Загружены данные продуктов в MRR (mrr.mrr_dim_products)")
+        conn_mrr.commit()
+        logging.info("Загружены данные продуктов в MRR (mrr_dim_products)")
+        cur_mrr.close()
+        conn_mrr.close()
         
-        # --- Шаг 5. Трансформация данных из MRR в STG ---
-        # Единый TRUNCATE для таблиц STG, чтобы избежать конфликтов внешних ключей
-        cur_anal.execute("TRUNCATE TABLE stg.stg_fact_sales, stg.stg_dim_customers, stg.stg_dim_products CASCADE;")
-        conn_anal.commit()
+        # --- Шаг 5. Трансформация данных из mrr в stg ---
+        # Подключаемся к базам mrr и stg
+        conn_mrr = connect_to_mrr()
+        cur_mrr = conn_mrr.cursor()
+        conn_stg = connect_to_stg()
+        cur_stg = conn_stg.cursor()
+        
+        # Единый TRUNCATE для таблиц stg (с CASCADE, чтобы избежать ошибок внешних ключей)
+        cur_stg.execute("TRUNCATE TABLE stg_fact_sales, stg_dim_customers, stg_dim_products CASCADE;")
+        conn_stg.commit()
         
         # Трансформация измерений: клиентов
-        cur_anal.execute("SELECT raw_data FROM mrr.mrr_dim_customers;")
-        mrr_cust = cur_anal.fetchall()
+        cur_mrr.execute("SELECT raw_data FROM mrr_dim_customers;")
+        mrr_cust = cur_mrr.fetchall()
         for row in mrr_cust:
             raw = row[0]
             data = raw if isinstance(raw, dict) else json.loads(raw)
-            cur_anal.execute("""
-                INSERT INTO stg.stg_dim_customers (id, customer_name, country, load_date)
-                VALUES (%s, %s, %s, NOW());
-            """, (data["id"], data["name"], data["country"]))
-        conn_anal.commit()
-        logging.info("Данные клиентов преобразованы и загружены в STG (stg.stg_dim_customers)")
+            # Теперь предполагается, что таблица stg_dim_customers имеет колонки:
+            # id, source_id, customer_name, country, load_date
+            cur_stg.execute("""
+                INSERT INTO stg_dim_customers (id, source_id, customer_name, country, load_date)
+                VALUES (%s, %s, %s, %s, NOW());
+            """, (data["id"], data["id"], data["name"], data["country"]))
+        conn_stg.commit()
+        logging.info("Данные клиентов преобразованы и загружены в STG (stg_dim_customers)")
         
         # Трансформация измерений: продуктов
-        cur_anal.execute("SELECT raw_data FROM mrr.mrr_dim_products;")
-        mrr_prod = cur_anal.fetchall()
+        cur_mrr.execute("SELECT raw_data FROM mrr_dim_products;")
+        mrr_prod = cur_mrr.fetchall()
         for row in mrr_prod:
             raw = row[0]
             data = raw if isinstance(raw, dict) else json.loads(raw)
-            cur_anal.execute("""
-                INSERT INTO stg.stg_dim_products (id, name, group_name, load_date)
-                VALUES (%s, %s, %s, NOW());
-            """, (data["id"], data["name"], data["groupname"]))
-        conn_anal.commit()
-        logging.info("Данные продуктов преобразованы и загружены в STG (stg.stg_dim_products)")
+            # Предполагаем, что таблица stg_dim_products имеет колонки:
+            # id, source_id, name, group_name, load_date,
+            # и source_id не может быть NULL.
+            cur_stg.execute("""
+                INSERT INTO stg_dim_products (id, source_id, name, group_name, load_date)
+                VALUES (%s, %s, %s, %s, NOW());
+            """, (data["id"], data["id"], data["name"], data["groupname"]))
+        conn_stg.commit()
+        logging.info("Данные продуктов преобразованы и загружены в STG (stg_dim_products)")
         
         # Трансформация фактов: продаж
-        cur_anal.execute("SELECT raw_data FROM mrr.mrr_fact_sales;")
-        mrr_sales = cur_anal.fetchall()
+        cur_mrr.execute("SELECT id, raw_data FROM mrr_fact_sales;")
+        mrr_sales = cur_mrr.fetchall()
         for row in mrr_sales:
-            raw = row[0]
+            mrr_id = row[0]
+            raw = row[1]
             data = raw if isinstance(raw, dict) else json.loads(raw)
-            cur_anal.execute("""
-                INSERT INTO stg.stg_fact_sales (customer_id, product_id, qty, sale_date, load_date)
-                VALUES (%s, %s, %s, %s, NOW());
-            """, (data["customer_id"], data["product_id"], data["qty"], data["sale_date"]))
-        conn_anal.commit()
-        logging.info("Данные продаж преобразованы и загружены в STG (stg.stg_fact_sales)")
+            # Если ключ "source_id" отсутствует, подставляем customer_id (опционально)
+            source_id = data.get("source_id", data["customer_id"])
+            cur_stg.execute("""
+                INSERT INTO stg_fact_sales (source_id, mrr_id, customer_id, product_id, qty, sale_date, load_date)
+                VALUES (%s, %s, %s, %s, %s, %s, NOW());
+            """, (source_id, mrr_id, data["customer_id"], data["product_id"], data["qty"], data["sale_date"]))
+        conn_stg.commit()
+        logging.info("Данные продаж преобразованы и загружены в STG (stg_fact_sales)")  
+
+        cur_mrr.close()
+        conn_mrr.close()
+        cur_stg.close()
+        conn_stg.close()
         
-        # --- Шаг 6. Загрузка данных из STG в DWH ---
-        # Для устранения ошибок внешних ключей очищаем все таблицы DWH вместе
-        cur_anal.execute("TRUNCATE TABLE dwh.dwh_fact_sales, dwh.dwh_dim_customers, dwh.dwh_dim_products CASCADE;")
-        conn_anal.commit()
+        # --- Шаг 6. Загрузка данных из stg в dwh ---
+        conn_dwh = connect_to_dwh()
+        cur_dwh = conn_dwh.cursor()
+        # Очищаем итоговые таблицы (в базе dwh находятся в public)
+        cur_dwh.execute("TRUNCATE TABLE dwh_fact_sales, dwh_dim_customers, dwh_dim_products CASCADE;")
+        conn_dwh.commit()
         
-        # Сначала загружаем измерения в DWH
-        cur_anal.execute("SELECT id, customer_name, country FROM stg.stg_dim_customers;")
-        stg_cust = cur_anal.fetchall()
+        # Сначала загружаем измерения из stg в dwh
+        # Для клиентов
+        conn_stg = connect_to_stg()
+        cur_stg = conn_stg.cursor()
+        cur_stg.execute("SELECT id, source_id, customer_name, country FROM stg_dim_customers;")
+        stg_cust = cur_stg.fetchall()
         for row in stg_cust:
-            cur_anal.execute("""
-                INSERT INTO dwh.dwh_dim_customers (id, customer_name, country)
-                VALUES (%s, %s, %s);
-            """, row)
-            
-        cur_anal.execute("SELECT id, name, group_name FROM stg.stg_dim_products;")
-        stg_prod = cur_anal.fetchall()
-        for row in stg_prod:
-            cur_anal.execute("""
-                INSERT INTO dwh.dwh_dim_products (id, name, group_name)
-                VALUES (%s, %s, %s);
-            """, row)
-        conn_anal.commit()
-        
-        # Затем загружаем факты в DWH
-        cur_anal.execute("SELECT customer_id, product_id, qty, sale_date FROM stg.stg_fact_sales;")
-        stg_sales = cur_anal.fetchall()
-        for row in stg_sales:
-            cur_anal.execute("""
-                INSERT INTO dwh.dwh_fact_sales (customer_id, product_id, qty, sale_date)
+            cur_dwh.execute("""
+                INSERT INTO dwh_dim_customers (id, source_id, customer_name, country)
                 VALUES (%s, %s, %s, %s);
             """, row)
-        conn_anal.commit()
-        logging.info("Данные загружены в DWH (dwh.dwh_fact_sales, dwh.dwh_dim_customers, dwh.dwh_dim_products)")
+        # Для продуктов
+        cur_stg.execute("SELECT id, source_id, name, group_name FROM stg_dim_products;")
+        stg_prod = cur_stg.fetchall()
+        for row in stg_prod:
+            cur_dwh.execute("""
+                INSERT INTO dwh_dim_products (id, source_id, name, group_name)
+                VALUES (%s, %s, %s, %s);
+            """, row)
+        conn_dwh.commit()
         
-        # --- Шаг 7. Обновление high water mark ---
+        # Затем загружаем факты из stg в dwh
+        cur_stg.execute("SELECT source_id, customer_id, product_id, qty, sale_date FROM stg_fact_sales;")
+        stg_sales = cur_stg.fetchall()
+        for row in stg_sales:
+            cur_dwh.execute("""
+                INSERT INTO dwh_fact_sales (source_id, customer_id, product_id, qty, sale_date)
+                VALUES (%s, %s, %s, %s, %s);
+            """, row)
+        conn_dwh.commit()
+        logging.info("Данные продаж загружены в DWH (dwh_fact_sales, dwh_dim_customers, dwh_dim_products)")
+        
+        cur_stg.close()
+        conn_stg.close()
+        cur_dwh.close()
+        conn_dwh.close()
+        
+        # --- Шаг 7. Обновление high water mark в dwh ---
         if new_sales:
-            new_last_update = max(sale[3] for sale in new_sales)
-            cur_anal.execute("""
+            new_last_update = max(sale[4] for sale in new_sales)
+            # Если new_last_update не является объектом datetime, преобразуем его
+            if not isinstance(new_last_update, datetime):
+                new_last_update = datetime.fromtimestamp(new_last_update)
+            conn_dwh = connect_to_dwh()
+            cur_dwh = conn_dwh.cursor()
+            cur_dwh.execute("""
                 UPDATE dwh_metadata.high_water_mark
                 SET last_update = %s
                 WHERE table_name = 'mrr_fact_sales';
             """, (new_last_update,))
-            conn_anal.commit()
+            conn_dwh.commit()
+            cur_dwh.close()
+            conn_dwh.close()
             logging.info("Обновлён high water mark: %s", new_last_update)
         else:
             logging.info("Новых данных нет, high water mark не изменён.")
         
-        cur_anal.close()
-        conn_anal.close()
+        log_event("etl_dag", "SUCCESS", "ETL-процесс успешно завершён.")
         logging.info("ETL-процесс успешно завершён.")
         
     except Exception as e:
+        log_event("etl_dag", "FAILURE", f"Ошибка в ETL-процессе: {str(e)}")
         logging.error("Ошибка в ETL-процессе", exc_info=True)
-        raise
+        raise e
 
 with DAG(
     'etl_dag',
@@ -256,14 +292,14 @@ with DAG(
         task_id='etl_task',
         python_callable=etl_task,
         on_success_callback=on_success_callback,
-        on_failure_callback=on_failure_callback,
-        dag=dag
+        on_failure_callback=on_failure_callback
     )
+    
     trigger_backup = TriggerDagRunOperator(
         task_id="trigger_backup_dag",
         trigger_dag_id="backup_dag",  
-        wait_for_completion=False, 
-        dag=dag
+        wait_for_completion=False
     )
     
     etl >> trigger_backup
+
