@@ -2,26 +2,28 @@ apiVersion: v1
 kind: Service
 metadata:
   name: postgres-operational-service
+  namespace: airflow-tt-v2
 spec:
   selector:
     app: postgres-operational
   type: NodePort
   ports:
   - protocol: TCP
-    port: 5432
+    port: 5434
     targetPort: 5432
-    nodePort: 30432
+    nodePort: 30434
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: postgres-analytics-service
+  namespace: airflow-tt-v2
 spec:
   selector:
     app: postgres-analytics
   type: NodePort
   ports:
   - protocol: TCP
-    port: 5433
+    port: 5435
     targetPort: 5432
-    nodePort: 30433
+    nodePort: 30435
