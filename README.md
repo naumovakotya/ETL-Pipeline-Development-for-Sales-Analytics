@@ -50,6 +50,9 @@ kubectl port-forward svc/airflow-webserver 8080:8080 --namespace airflow-tt-v2
 ---
 
 ## 🔹 Скриншоты и результаты 📊
+![image](https://github.com/user-attachments/assets/9e798642-6cca-45e4-968c-c63ec7b40b7e)
+![image](https://github.com/user-attachments/assets/411ef91b-9648-4d6a-b4b5-4f503f02f7a1)
+![image](https://github.com/user-attachments/assets/0c91e928-ede1-400e-98d4-9dda585d107d)
 ![Изображение WhatsApp 2025-02-06 в 18 53 07_6f453a38](https://github.com/user-attachments/assets/b3dd2361-39a4-4dcc-90d7-da532aa7fcec)
 
 ---
