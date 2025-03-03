@@ -1,65 +1,73 @@
-# 📊 Test_task: ETL-процесс в Kubernetes для аналитики продаж
+# 📊 Test_task: ETL Pipeline in Kubernetes for Sales Analytics  
 
-## 🔹 Описание проекта
-Описание дорабатывается, как и оформление данного проекта. Однако, в скором времени здесь будет самое актуальное состояние.
-Проект разрабатывался для обработки и анализа данных продаж. Данные поступают в оперативную БД, затем через ETL переносятся в аналитическое хранилище (DWH), где агрегируются. Визуализация происходит через Power BI.
+## 🔹 Project Description  
+This project was developed for processing and analyzing sales data. The data flows from an **operational database** to an **analytical data warehouse (DWH)** via an **ETL pipeline**, where it is aggregated. The final visualization is performed using **Power BI**.
 
-### 🔹 Стек технологий
-- **ETL**: Apache Airflow
-- **Хранилище**: PostgreSQL (DWH)
-- **Оркестрация**: Kubernetes + Minikube
-- **Контейнеризация**: Docker
-- **BI**: Power BI
-- **Управление БД**: DBeaver
+### 🔹 Tech Stack  
+- **ETL**: Apache Airflow  
+- **Storage**: PostgreSQL (DWH)  
+- **Orchestration**: Kubernetes + Minikube  
+- **Containerization**: Docker  
+- **BI Tool**: Power BI  
+- **Database Management**: DBeaver  
+- **Automation**: Bash scripts  
 
 ---
 
-## 🔹 Запуск проекта
+## 🔹 Project Structure  
+The infrastructure consists of:  
+1️⃣ **Operational Database** (stores raw transactions with timestamps).  
+2️⃣ **MRR Layer** (stages all extracted data).  
+3️⃣ **STG Layer** (aggregated and cleaned data).  
+4️⃣ **DWH** (final structure for BI analytics).  
+5️⃣ **Logging system** in `dwh_metadata.logs`.  
+6️⃣ **High Water Mark** implemented for incremental updates.  
 
-### 📌 1. Установите Minikube и Kubectl  
-- Инструкция: https://minikube.sigs.k8s.io/docs/start/
+The project includes SQL scripts for creating databases and generating test data.
 
-### 📌 2. Запустите Minikube  
-```bash
-minikube start
-```
+---
 
-### 📌 3. Разверните инфраструктуру (БД, Airflow, ETL)  
+## 🔹 How to Run  
+
+### 📌 1. Install Minikube and Kubectl  
+- Follow the official guide: [Minikube Setup](https://minikube.sigs.k8s.io/docs/start/)  
+
+### 📌 2. Start Minikube and Deploy the Infrastructure  
 ```bash
 ./start_project.sh
 ```
+This script will:  
+✔ Start Minikube  
+✔ Deploy PostgreSQL, Airflow, and ETL processes  
+✔ Forward necessary ports  
+✔ Start Apache Airflow  
 
-### 📌 4. Прокиньте порты для PostgreSQL  
-```bash
-kubectl port-forward svc/postgres-operational 5434:5432 --namespace airflow-tt-v2 &
-kubectl port-forward svc/postgres-analytics 5435:5432 --namespace airflow-tt-v2 &
-```
+### 📌 3. Connect to Databases via DBeaver  
+- **Operational DB**: `localhost:5434`  
+- **Analytical DB**: `localhost:5435`  
 
-### 📌 5. Открываем DBeaver и подключаемся:
-- **Оперативная БД**: `localhost:5434`
-- **Аналитическая БД**: `localhost:5435`
-
-### 📌 6. Запуск DAG в Apache Airflow  
-```bash
-kubectl port-forward svc/airflow-webserver 8080:8080 --namespace airflow-tt-v2
-```
-Открываем **http://localhost:8080**, включаем DAG `dag_etl.py`.
-
-### 📌 7. Анализ данных в Power BI  
-- Готовый дашборд см. в `Test_task_Inovis.pbix`.
-
----
-
-## 🔹 Скриншоты и результаты 📊
-![image](https://github.com/user-attachments/assets/9e798642-6cca-45e4-968c-c63ec7b40b7e)
-![image](https://github.com/user-attachments/assets/411ef91b-9648-4d6a-b4b5-4f503f02f7a1)
-![image](https://github.com/user-attachments/assets/0c91e928-ede1-400e-98d4-9dda585d107d)
+### 📌 4. View the Power BI Dashboard  
+- Сheck the screenshot below.  
 ![Изображение WhatsApp 2025-02-06 в 18 53 07_6f453a38](https://github.com/user-attachments/assets/b3dd2361-39a4-4dcc-90d7-da532aa7fcec)
+---
+
+## 🔹 Screenshots & Results 📊  
+
+### ✅ Airflow ETL DAG  
+![image](https://github.com/user-attachments/assets/411ef91b-9648-4d6a-b4b5-4f503f02f7a1)
+
+### ✅ Airflow Backup DAG  
+![image](https://github.com/user-attachments/assets/0c91e928-ede1-400e-98d4-9dda585d107d)
+
+### ✅ DBeaver: Database Structure & Logs  
+![image](https://github.com/user-attachments/assets/9e798642-6cca-45e4-968c-c63ec7b40b7e)
+
 
 ---
 
-## 🔹 **Авторы**  
-👩‍💻 Разработано в рамках тестового задания.  
+## 🔹 Authors  
+Developed as part of a test task. 🚀  
+
 
 
 
